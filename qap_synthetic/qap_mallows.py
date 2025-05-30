@@ -7,9 +7,8 @@ import os, subprocess
 import argparse
 
 import botorch
-from botorch import fit_gpytorch_model
-from botorch.models import FixedNoiseGP, SingleTaskGP
-from botorch.optim import module_to_array
+from botorch.fit import fit_gpytorch_mll
+from botorch.models.gp_regression import SingleTaskGP
 from botorch.acquisition import ExpectedImprovement
 from gpytorch.constraints import Interval, Positive
 from gpytorch.priors import Prior
@@ -114,7 +113,7 @@ def bo_loop(benchmark_index, kernel_type):
             mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
             model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001).float()
             mll_bt.model.likelihood.noise_covar.raw_noise.requires_grad = False
-            fit_gpytorch_model(mll_bt)
+            fit_gpytorch_mll(mll_bt)
             # print(train_y.dtype)
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y.float())}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
