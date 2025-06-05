@@ -14,6 +14,7 @@ from gpytorch.constraints import Interval, Positive
 from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
 from copy import deepcopy
+from botorch.optim import optimize_acqf
 
 
 class MergeKernel(Kernel):
@@ -32,8 +33,8 @@ def merge_sort(arr):
         return []
     if len(arr) > 1:
         mid = len(arr) // 2
-        left_half = arr[:mid]
-        right_half = arr[mid:]
+        left_half = deepcopy(arr[:mid])
+        right_half = deepcopy(arr[mid:])
 
         left_feature = merge_sort(left_half)
         right_feature = merge_sort(right_half)
@@ -71,6 +72,7 @@ def merge_sort(arr):
         return feature[:-1]
 
 
+
 def featurize(x, anchor):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
@@ -86,8 +88,9 @@ def featurize(x, anchor):
 
 
 def anchor_mapping(x, anchor):
-    anchor_dict = {anchor[i]: i for i in range(len(anchor))}
-    return [anchor_dict[int(i)] for i in x]
+    return x  # Anchor not used in this version.
+    # anchor_dict = {anchor[i]: i for i in range(len(anchor))}
+    # return [anchor_dict[int(i)] for i in x]
 
 
 def evaluate_tsp(x, benchmark_index, dim):
@@ -121,6 +124,101 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return mll, model
+
+
+def restore_merge_sort(arr, permutation):
+    # print(f'Handling array: {arr} with permutation {permutation}')
+    if len(permutation) == 2:
+        if arr[0] == 0:
+            return permutation
+        else:
+            return [permutation[1], permutation[0]]
+    if len(permutation) == 3:
+        if arr[1] + arr[2] == 0:
+            right_permutation = [permutation[1], permutation[2]]
+            left_permutation = [permutation[0]]
+        elif arr[1] + arr[2] == 1:
+            right_permutation = [permutation[0], permutation[2]]
+            left_permutation = [permutation[1]]
+        else:
+            right_permutation = [permutation[0], permutation[1]]
+            left_permutation = [permutation[2]]
+
+        right_permutation = [right_permutation[0], right_permutation[1]] if arr[0] == 0 else [right_permutation[1],
+                                                                                              right_permutation[0]]
+        return left_permutation + right_permutation
+
+    permutation_length = len(permutation)
+    order = arr[-permutation_length + 1:]
+    arr = arr[:-permutation_length + 1]
+
+    left_permutation = []
+    right_permutation = []
+
+    # print('order: ', order)
+    for index, i in enumerate(order):
+        if i == 0:
+            left_permutation.append(permutation[index])
+        else:
+            right_permutation.append(permutation[index])
+
+        if len(left_permutation) == len(permutation) // 2:
+            for j in range(index + 1, len(permutation)):
+                right_permutation.append(permutation[j])
+            break
+        elif len(right_permutation) == int(np.ceil(len(permutation) / 2)):
+            for j in range(index + 1, len(permutation)):
+                left_permutation.append(permutation[j])
+            break
+
+    # print('left & right: ', left_permutation, right_permutation)
+    if len(left_permutation) == len(right_permutation):
+        mid = len(arr) // 2
+        left_arr = arr[:mid]
+        right_arr = arr[mid:]
+    else:
+        difference = int(np.floor(np.log2(len(left_permutation))) + 1)
+        # print(difference)
+        mid = (len(arr) - difference) // 2
+        left_arr = arr[:mid]
+        right_arr = arr[mid:]
+
+    left = restore_merge_sort(left_arr, left_permutation)
+    right = restore_merge_sort(right_arr, right_permutation)
+    return left + right
+
+
+def restore_featurize_merge(x, permutation):
+    feature = []
+    for arr in x:
+        arr_norm = []
+        for i in arr:
+            if i > 0:
+                arr_norm.append(1)
+            else:
+                arr_norm.append(0)
+        feature.append(restore_merge_sort(arr_norm, permutation))
+    return feature
+
+
+def EI_optimize(AF, x, anchor, num_restarts=10, raw_samples=20, n_iter=100):
+    feature = featurize(x.unsqueeze(0), anchor).unsqueeze(0).detach()
+    feature_length = feature.shape[-1]
+    permutation_length = x.shape[-1]
+
+    bounds = torch.stack([-torch.ones(feature_length), torch.ones(feature_length)])
+    candidates, acq_value = optimize_acqf(
+        acq_function=AF,  # 已经构造好的 ExpectedImprovement 实例
+        bounds=bounds,  # shape = (2, d)
+        q=1,  # 同时找 1 个候选点
+        num_restarts=num_restarts,  # 重启次数
+        raw_samples=raw_samples,  # 每次重启时的随机初始点数量
+        options={"maxiter": n_iter},
+    )
+
+    permutation = restore_featurize_merge(candidates, [i for i in range(permutation_length)])[0]
+    print(f"best AF value : {permutation} at best_point = {acq_value[0]}")
+    return torch.tensor(permutation), acq_value[0]
 
 
 def EI_local_search(AF, x, anchor):
@@ -173,9 +271,9 @@ def bo_loop(dim, benchmark_index, kernel_type):
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
-            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
+            best_point, ls_val = EI_optimize(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
             for _ in range(10):
-                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
+                new_point, new_val = EI_optimize(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val

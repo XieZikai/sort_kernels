@@ -1,4 +1,5 @@
 import numpy as np
+from copy import deepcopy
 
 
 def merge_sort(arr):
@@ -7,8 +8,8 @@ def merge_sort(arr):
         return []
     if len(arr) > 1:
         mid = len(arr) // 2
-        left_half = arr[:mid]
-        right_half = arr[mid:]
+        left_half = deepcopy(arr[:mid])
+        right_half = deepcopy(arr[mid:])
 
         left_feature = merge_sort(left_half)
         right_feature = merge_sort(right_half)
@@ -23,7 +24,7 @@ def merge_sort(arr):
             if left_half[i] < right_half[j]:
                 arr[k] = left_half[i]
                 i += 1
-                feature.append(0)
+                feature.append(-1)
             else:
                 arr[k] = right_half[j]
                 j += 1
@@ -40,7 +41,7 @@ def merge_sort(arr):
             arr[k] = right_half[j]
             j += 1
             k += 1
-            feature.append(0)
+            feature.append(-1)
 
         # print('Return: ', feature)
         return feature[:-1]
@@ -130,3 +131,9 @@ def restore_featurize_merge(x, permutation):
                 arr_norm.append(0)
         feature.append(restore_merge_sort(arr_norm, permutation))
     return feature
+
+
+if __name__ == '__main__':
+    p = np.array([[1, 4, 2, 3, 5]])
+    f = featurize_merge(p)
+    print(f)

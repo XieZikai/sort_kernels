@@ -32,8 +32,8 @@ def merge_sort(arr):
         return []
     if len(arr) > 1:
         mid = len(arr) // 2
-        left_half = arr[:mid]
-        right_half = arr[mid:]
+        left_half = deepcopy(arr[:mid])
+        right_half = deepcopy(arr[mid:])
 
         left_feature = merge_sort(left_half)
         right_feature = merge_sort(right_half)
