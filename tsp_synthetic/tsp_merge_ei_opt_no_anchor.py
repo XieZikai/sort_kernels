@@ -19,12 +19,12 @@ from botorch.optim import optimize_acqf
 
 class MergeKernel(Kernel):
     has_lengthscale = True
-    def forward(self, X, X2, **params):
-        if len(X.shape) > 2:
-            kernel_mat = torch.sum((X - X2)**2, axis=-1)
-        else:
-            kernel_mat = torch.sum((X[:, None, :] - X2)**2, axis=-1)
-        return torch.exp(-self.lengthscale * kernel_mat)
+    def forward(self, x1, x2, **params):
+        x1_unsq = x1.unsqueeze(-2)
+        x2_unsq = x2.unsqueeze(-3)
+        diff = x1_unsq - x2_unsq
+        diff_sq = diff.pow(2).sum(dim=-1)
+        return torch.exp(-self.lengthscale * diff_sq)
 
 
 def merge_sort(arr):
@@ -88,9 +88,9 @@ def featurize(x, anchor):
 
 
 def anchor_mapping(x, anchor):
-    return x  # Anchor not used in this version.
-    # anchor_dict = {anchor[i]: i for i in range(len(anchor))}
-    # return [anchor_dict[int(i)] for i in x]
+    # return x  # Anchor not used in this version.
+    anchor_dict = {anchor[i]: i for i in range(len(anchor))}
+    return [anchor_dict[int(i)] for i in x]
 
 
 def evaluate_tsp(x, benchmark_index, dim):
@@ -201,7 +201,7 @@ def restore_featurize_merge(x, permutation):
     return feature
 
 
-def EI_optimize(AF, x, anchor, num_restarts=10, raw_samples=20, n_iter=100):
+def EI_optimize(AF, x, anchor, num_restarts=50, raw_samples=100, n_iter=1000):
     feature = featurize(x.unsqueeze(0), anchor).unsqueeze(0).detach()
     feature_length = feature.shape[-1]
     permutation_length = x.shape[-1]
@@ -217,8 +217,8 @@ def EI_optimize(AF, x, anchor, num_restarts=10, raw_samples=20, n_iter=100):
     )
 
     permutation = restore_featurize_merge(candidates, [i for i in range(permutation_length)])[0]
-    print(f"best AF value : {permutation} at best_point = {acq_value[0]}")
-    return torch.tensor(permutation), acq_value[0]
+    print(f"best AF value : {permutation} at best_point = {acq_value.item()}")
+    return torch.tensor(permutation), acq_value.item()
 
 
 def EI_local_search(AF, x, anchor):
@@ -257,8 +257,10 @@ def bo_loop(dim, benchmark_index, kernel_type):
         for i in range(n_init):
             outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
         train_y = -1*torch.tensor(outputs)
+
+        anchor = train_x[train_y.argmax()].numpy()
+
         for num_iters in range(n_init, n_evals):
-            anchor = np.random.permutation(np.arange(dim))  # Random anchor initialization
             inputs = featurize(train_x, anchor)
             if kernel_type == 'merge':
                 covar_module = MergeKernel()
@@ -272,7 +274,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
             best_point, ls_val = EI_optimize(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
-            for _ in range(10):
+            for _ in range(1):
                 new_point, new_val = EI_optimize(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
                 if new_val > ls_val:
                     best_point = new_point
@@ -291,7 +293,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_random_anchor_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_ei_opt_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':

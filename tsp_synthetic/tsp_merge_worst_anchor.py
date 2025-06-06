@@ -88,7 +88,6 @@ def featurize(x, anchor):
 def anchor_mapping(x, anchor):
     anchor_dict = {anchor[i]: i for i in range(len(anchor))}
     return [anchor_dict[int(i)] for i in x]
-    return x
 
 
 def evaluate_tsp(x, benchmark_index, dim):
@@ -160,8 +159,11 @@ def bo_loop(dim, benchmark_index, kernel_type):
         for i in range(n_init):
             outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
         train_y = -1*torch.tensor(outputs)
+
+        anchor = train_x[train_y.argmin()].numpy()
+        # anchor = np.random.permutation(np.arange(dim))  # Random anchor initialization
+
         for num_iters in range(n_init, n_evals):
-            anchor = np.random.permutation(np.arange(dim))  # Random anchor initialization
             inputs = featurize(train_x, anchor)
             if kernel_type == 'merge':
                 covar_module = MergeKernel()
@@ -194,7 +196,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_random_anchor_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_worst_anchor_EI_dim_'+str(dim)+'benchmark_index_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':
