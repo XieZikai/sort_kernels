@@ -16,31 +16,21 @@ from gpytorch.kernels import Kernel
 from copy import deepcopy
 
 
+"""
+使用标准置换[0, 1, ..., n-1]作为基准anchor，然后进行车轮置换：
+[1,2,...,n-1,0], [2,3,...,n-1,0,1],[3,4,...,n-1,0,1,2],...
+使用这些车轮置换作为anchor set，进行平均kernel
+"""
+
+
 class MergeKernel(Kernel):
     has_lengthscale = True
-
-    def __init__(self, anchors, **kwargs):
-        super().__init__(**kwargs)
-        self.anchors = anchors  # anchors 是一个 torch.Tensor，shape=(num_anchors, feature_dim)
-
     def forward(self, X, X2, **params):
-        total_kernel = 0
-        num_anchors = self.anchors.shape[0]
-
-        # 循环对所有 anchor 进行右乘后的 kernel 平均
-        for anchor in self.anchors:
-            X_anchor = X + anchor  # 若 featurize 已考虑anchor，这里是简单示例；根据你的具体featurize调整
-            X2_anchor = X2 + anchor
-
-            if len(X.shape) > 2:
-                kernel_mat = torch.sum((X_anchor - X2_anchor) ** 2, axis=-1)
-            else:
-                kernel_mat = torch.sum((X_anchor[:, None, :] - X2_anchor) ** 2, axis=-1)
-
-            total_kernel += torch.exp(-self.lengthscale * kernel_mat)
-
-        avg_kernel = total_kernel / num_anchors
-        return avg_kernel
+        if len(X.shape) > 2:
+            kernel_mat = torch.sum((X - X2)**2, axis=-1)
+        else:
+            kernel_mat = torch.sum((X[:, None, :] - X2)**2, axis=-1)
+        return torch.exp(-self.lengthscale * kernel_mat)
 
 
 def merge_sort(arr):
@@ -88,7 +78,7 @@ def merge_sort(arr):
         return feature[:-1]
 
 
-def featurize(x):
+def featurize(x, anchor):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
@@ -96,9 +86,15 @@ def featurize(x):
     feature = []
     x_copy = deepcopy(x)
     for arr in x_copy:
-        feature.append(merge_sort(arr))
+        arr_anchor = anchor_mapping(arr, anchor)
+        feature.append(merge_sort(arr_anchor))
     normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
     return torch.tensor(feature/normalizer)
+
+
+def anchor_mapping(x, anchor):
+    anchor_dict = {anchor[i]: i for i in range(len(anchor))}
+    return [anchor_dict[int(i)] for i in x]
 
 
 def evaluate_tsp(x, benchmark_index, dim):
@@ -134,8 +130,8 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
     return mll, model
 
 
-def EI_local_search(AF, x):
-    feature = featurize(x.unsqueeze(0)).unsqueeze(0).detach()
+def EI_local_search(AF, x, anchor):
+    feature = featurize(x.unsqueeze(0), anchor).unsqueeze(0).detach()
     best_val = AF(feature)
     best_point = x.numpy()
     for num_steps in range(100):
@@ -146,7 +142,7 @@ def EI_local_search(AF, x):
             for j in range(i+1, len(best_point)):
                 x_new = best_point.copy()
                 x_new[i], x_new[j] = x_new[j], x_new[i]
-                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0)).unsqueeze(1)).detach())
+                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0), anchor).unsqueeze(1)).detach())
                 all_points.append(x_new)
         idx = np.argmax(all_vals)
         if all_vals[idx] > best_val:
@@ -171,16 +167,16 @@ def bo_loop(dim, benchmark_index, kernel_type):
             outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
         train_y = -1*torch.tensor(outputs)
 
-        n = train_x.shape[-1]
-        standard_perm = torch.arange(n)
-        anchor_set = torch.stack([torch.roll(standard_perm, shifts=i) for i in range(n)])
+        # anchor = train_x[train_y.argmax()].numpy()  # best anchor
+        anchor = np.random.permutation(np.arange(dim))  # random anchor
 
         for num_iters in range(n_init, n_evals):
+            # anchor = np.random.permutation(np.arange(dim))  # random anchor for each iteration
+            anchor = train_x[train_y.argmax()].numpy()  # best anchor
 
-            inputs = featurize(train_x)
+            inputs = featurize(train_x, anchor)
             if kernel_type == 'merge':
-                covar_module = MergeKernel(anchor_set)
-
+                covar_module = MergeKernel()
             train_y = (train_y - torch.mean(train_y))/(torch.std(train_y))
             mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
             model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001)
@@ -190,9 +186,9 @@ def bo_loop(dim, benchmark_index, kernel_type):
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
-            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))
+            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
             for _ in range(10):
-                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val
@@ -210,7 +206,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_average_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_fixed_random_anchor_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':
