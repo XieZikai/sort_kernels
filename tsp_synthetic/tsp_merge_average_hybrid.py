@@ -17,11 +17,9 @@ from copy import deepcopy
 
 
 """
-该策略为标准策略，即在每个循环上选择一个anchor作为变换
-选择anchor的策略有以下几种：
-1. 随机选择（效果似乎非常差）
-2. 选择最好的anchor
-3. 选择最差的anchor
+该策略为hybrid策略：
+1. 训练时不右乘；
+2. 预测（EI）时使用average EI
 """
 
 
@@ -80,18 +78,23 @@ def merge_sort(arr):
         return feature[:-1]
 
 
-def featurize(x, anchor):
+def featurize(x, anchors):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
     assert len(x.shape) == 2, "Only featurize 2 dimension permutation vector"
-    feature = []
+    features = []
     x_copy = deepcopy(x)
     for arr in x_copy:
-        arr_anchor = anchor_mapping(arr, anchor)
-        feature.append(merge_sort(arr_anchor))
+        feature = []
+        for anchor in anchors:
+            arr_anchor = anchor_mapping(arr, anchor)
+            feature.append(merge_sort(arr_anchor))
+        features.append(feature)
+    features = np.array(features)
+    features = np.mean(features, axis=1)
     normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
-    return torch.tensor(feature/normalizer)
+    return torch.tensor(features/normalizer)
 
 
 def anchor_mapping(x, anchor):
@@ -132,8 +135,8 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
     return mll, model
 
 
-def EI_local_search(AF, x, anchor):
-    feature = featurize(x.unsqueeze(0), anchor).unsqueeze(0).detach()
+def EI_local_search(AF, x, anchors):
+    feature = featurize(x.unsqueeze(0), anchors).unsqueeze(0).detach()
     best_val = AF(feature)
     best_point = x.numpy()
     for num_steps in range(100):
@@ -144,7 +147,7 @@ def EI_local_search(AF, x, anchor):
             for j in range(i+1, len(best_point)):
                 x_new = best_point.copy()
                 x_new[i], x_new[j] = x_new[j], x_new[i]
-                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0), anchor).unsqueeze(1)).detach())
+                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0), anchors).unsqueeze(1)).detach())
                 all_points.append(x_new)
         idx = np.argmax(all_vals)
         if all_vals[idx] > best_val:
@@ -156,7 +159,7 @@ def EI_local_search(AF, x, anchor):
     return torch.from_numpy(best_point), best_val
 
 
-def bo_loop(dim, benchmark_index, kernel_type):
+def bo_loop(dim, benchmark_index, kernel_type, M=20):
     n_init = 20
     n_evals = 200
     for nruns in range(20):
@@ -168,15 +171,11 @@ def bo_loop(dim, benchmark_index, kernel_type):
         for i in range(n_init):
             outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
         train_y = -1*torch.tensor(outputs)
-
-        # anchor = train_x[train_y.argmax()].numpy()  # best anchor
-        anchor = np.random.permutation(np.arange(dim))  # random anchor
+        anchors = [np.random.permutation(np.arange(dim)) for _ in range(M)]  # Random anchor initialization
 
         for num_iters in range(n_init, n_evals):
-            # anchor = np.random.permutation(np.arange(dim))  # random anchor for each iteration
-            anchor = train_x[train_y.argmax()].numpy()  # best anchor
 
-            inputs = featurize(train_x, anchor)
+            inputs = featurize(train_x, anchors)
             if kernel_type == 'merge':
                 covar_module = MergeKernel()
             train_y = (train_y - torch.mean(train_y))/(torch.std(train_y))
@@ -188,9 +187,9 @@ def bo_loop(dim, benchmark_index, kernel_type):
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
-            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
+            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchors)
             for _ in range(10):
-                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchors)
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val
@@ -208,7 +207,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_fixed_random_anchor_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_average_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':
