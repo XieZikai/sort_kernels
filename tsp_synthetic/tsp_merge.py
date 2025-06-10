@@ -9,7 +9,7 @@ import argparse
 import botorch
 from botorch.fit import fit_gpytorch_model
 from botorch.models import SingleTaskGP
-from botorch.acquisition import ExpectedImprovement
+from botorch.acquisition import ExpectedImprovement, UpperConfidenceBound
 from gpytorch.constraints import Interval, Positive
 from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
@@ -170,7 +170,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
         train_y = -1*torch.tensor(outputs)
 
         # anchor = train_x[train_y.argmax()].numpy()  # best anchor
-        anchor = np.random.permutation(np.arange(dim))  # random anchor
+        # anchor = np.random.permutation(np.arange(dim))  # random anchor
 
         for num_iters in range(n_init, n_evals):
             # anchor = np.random.permutation(np.arange(dim))  # random anchor for each iteration
@@ -186,7 +186,8 @@ def bo_loop(dim, benchmark_index, kernel_type):
             fit_gpytorch_model(mll_bt)
             # print(train_y.dtype)
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
-            EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
+            # EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
+            EI = UpperConfidenceBound(model_bt, beta=2.576)
             # Multiple random restarts
             best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
             for _ in range(10):
@@ -208,7 +209,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_fixed_random_anchor_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_UCB_dim_'+str(dim)+'benchmark_index_best_anchor_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':

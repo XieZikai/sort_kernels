@@ -9,7 +9,7 @@ import argparse
 import botorch
 from botorch.fit import fit_gpytorch_model
 from botorch.models import SingleTaskGP
-from botorch.acquisition import ExpectedImprovement
+from botorch.acquisition import ExpectedImprovement, UpperConfidenceBound
 from gpytorch.constraints import Interval, Positive
 from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
@@ -271,7 +271,8 @@ def bo_loop(dim, benchmark_index, kernel_type):
             fit_gpytorch_model(mll_bt)
             # print(train_y.dtype)
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
-            EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
+            EI = UpperConfidenceBound(model_bt, beta=2.576)
+            # EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
             best_point, ls_val = EI_optimize(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
             for _ in range(1):
@@ -293,7 +294,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_ei_opt_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_UCB_dim_'+str(dim)+'benchmark_index_ei_opt_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':

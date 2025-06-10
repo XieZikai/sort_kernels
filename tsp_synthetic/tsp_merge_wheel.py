@@ -206,7 +206,11 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_fixed_random_anchor_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            name = 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_wheel_std_anchor_'+str(benchmark_index)
+            path = f'./results/{name}/'
+            os.mkdir(path)
+            path = f'./results/{name}/{name}'
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, path +'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':
