@@ -23,19 +23,22 @@ class MergeKernel(Kernel):
         super().__init__(**kwargs)
         self.anchors = anchors  # anchors 是一个 torch.Tensor，shape=(num_anchors, feature_dim)
 
+    def featurize(self, X, anchor):
+        return torch.Tensor(featurize(X, anchor))
+
     def forward(self, X, X2, **params):
         total_kernel = 0
         num_anchors = self.anchors.shape[0]
 
         # 循环对所有 anchor 进行右乘后的 kernel 平均
         for anchor in self.anchors:
-            X_anchor = X + anchor  # 若 featurize 已考虑anchor，这里是简单示例；根据你的具体featurize调整
-            X2_anchor = X2 + anchor
+            feature_X = self.featurize(X, anchor)
+            feature_X2 = self.featurize(X2, anchor)
 
             if len(X.shape) > 2:
-                kernel_mat = torch.sum((X_anchor - X2_anchor) ** 2, axis=-1)
+                kernel_mat = torch.sum((feature_X - feature_X2) ** 2, axis=-1)
             else:
-                kernel_mat = torch.sum((X_anchor[:, None, :] - X2_anchor) ** 2, axis=-1)
+                kernel_mat = torch.sum((feature_X[:, None, :] - feature_X2) ** 2, axis=-1)
 
             total_kernel += torch.exp(-self.lengthscale * kernel_mat)
 
@@ -88,7 +91,7 @@ def merge_sort(arr):
         return feature[:-1]
 
 
-def featurize(x):
+def featurize(x, anchor):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
@@ -96,9 +99,16 @@ def featurize(x):
     feature = []
     x_copy = deepcopy(x)
     for arr in x_copy:
-        feature.append(merge_sort(arr))
+        arr_anchor = anchor_mapping(arr, anchor)
+        feature.append(merge_sort(arr_anchor))
     normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
     return torch.tensor(feature/normalizer)
+
+
+def anchor_mapping(x, anchor):
+    anchor_dict = {anchor[i]: i for i in range(len(anchor))}
+    return [anchor_dict[int(i)] for i in x]
+
 
 
 def evaluate_tsp(x, benchmark_index, dim):
