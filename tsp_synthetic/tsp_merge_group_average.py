@@ -30,20 +30,37 @@ class MergeKernel(Kernel):
         total_kernel = 0
         num_anchors = self.anchors.shape[0]
 
-        # 循环对所有 anchor 进行右乘后的 kernel 平均
-        for anchor in self.anchors:
-            feature_X = self.featurize(X, anchor)
-            feature_X2 = self.featurize(X2, anchor)
+        if len(X.shape) == 3:
+            x = X.squeeze(0)
+            x2 = X2.squeeze(0)
+            for anchor in self.anchors:
+                feature_X = self.featurize(x, anchor)
+                feature_X2 = self.featurize(x2, anchor)
 
-            if len(X.shape) > 2:
-                kernel_mat = torch.sum((feature_X - feature_X2) ** 2, axis=-1)
-            else:
-                kernel_mat = torch.sum((feature_X[:, None, :] - feature_X2) ** 2, axis=-1)
+                if len(X.shape) > 2:
+                    kernel_mat = torch.sum((feature_X - feature_X2) ** 2, axis=-1)
+                else:
+                    kernel_mat = torch.sum((feature_X[:, None, :] - feature_X2) ** 2, axis=-1)
 
-            total_kernel += torch.exp(-self.lengthscale * kernel_mat)
+                total_kernel += torch.exp(-self.lengthscale * kernel_mat)
 
-        avg_kernel = total_kernel / num_anchors
-        return avg_kernel
+            avg_kernel = total_kernel / num_anchors
+            return avg_kernel
+        else:
+            # 循环对所有 anchor 进行右乘后的 kernel 平均
+            for anchor in self.anchors:
+                feature_X = self.featurize(X, anchor)
+                feature_X2 = self.featurize(X2, anchor)
+
+                if len(X.shape) > 2:
+                    kernel_mat = torch.sum((feature_X - feature_X2) ** 2, axis=-1)
+                else:
+                    kernel_mat = torch.sum((feature_X[:, None, :] - feature_X2) ** 2, axis=-1)
+
+                total_kernel += torch.exp(-self.lengthscale * kernel_mat)
+
+            avg_kernel = total_kernel / num_anchors
+            return avg_kernel
 
 
 def merge_sort(arr):
@@ -106,8 +123,11 @@ def featurize(x, anchor):
 
 
 def anchor_mapping(x, anchor):
-    anchor_dict = {anchor[i]: i for i in range(len(anchor))}
-    return [anchor_dict[int(i)] for i in x]
+    # 构造一个映射：anchor 中每个元素（转为 int）映射到它的索引（int）
+    anchor_dict = {int(anchor[i].item()): i for i in range(len(anchor))}
+
+    # 然后对 x 中每个元素（转为 int）进行映射
+    return torch.tensor([anchor_dict[int(i.item())] for i in x])
 
 
 
@@ -145,8 +165,8 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
 
 
 def EI_local_search(AF, x):
-    feature = featurize(x.unsqueeze(0)).unsqueeze(0).detach()
-    best_val = AF(feature)
+    # feature = featurize(x.unsqueeze(0)).unsqueeze(0).detach()
+    best_val = AF(x.unsqueeze(0))
     best_point = x.numpy()
     for num_steps in range(100):
         # print(f"best AF value : {best_val} at best_point = {best_point}")
@@ -156,7 +176,7 @@ def EI_local_search(AF, x):
             for j in range(i+1, len(best_point)):
                 x_new = best_point.copy()
                 x_new[i], x_new[j] = x_new[j], x_new[i]
-                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0)).unsqueeze(1)).detach())
+                all_vals.append(AF(torch.from_numpy(x_new).unsqueeze(0)).detach())
                 all_points.append(x_new)
         idx = np.argmax(all_vals)
         if all_vals[idx] > best_val:
@@ -187,17 +207,17 @@ def bo_loop(dim, benchmark_index, kernel_type):
 
         for num_iters in range(n_init, n_evals):
 
-            inputs = featurize(train_x)
+            # inputs = featurize(train_x)
             if kernel_type == 'merge':
                 covar_module = MergeKernel(anchor_set)
 
             train_y = (train_y - torch.mean(train_y))/(torch.std(train_y))
-            mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
+            mll_bt, model_bt = initialize_model(train_x.double(), train_y.unsqueeze(1), covar_module)
             model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001)
             mll_bt.model.likelihood.noise_covar.raw_noise.requires_grad = False
             fit_gpytorch_model(mll_bt)
             # print(train_y.dtype)
-            print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
+            print(f'\n -- NLL: {mll_bt(model_bt(train_x.double()), train_y)}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
             best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))

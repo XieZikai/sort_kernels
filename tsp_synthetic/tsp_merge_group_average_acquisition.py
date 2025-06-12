@@ -92,6 +92,27 @@ def featurize(x, anchors):
     return torch.tensor(features/normalizer)
 
 
+def new_featurize(x, anchors):
+    """
+    Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
+    """
+    assert len(x.shape) == 2, "Only featurize 2 dimension permutation vector"
+    features = []
+    x_copy = deepcopy(x)
+    for anchor in anchors:
+        feature = []
+        for arr in x_copy:
+            arr_anchor = anchor_mapping(arr, anchor)
+            feature.append(merge_sort(arr_anchor))
+        features.append(feature)
+    features = np.array(features)
+    # features = np.mean(features, axis=1)
+    # feature_length = features.shape[-1]
+    # features = features.reshape(-1, feature_length)
+    normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
+    return torch.tensor(features/normalizer)
+
+
 def anchor_mapping(x, anchor):
     anchor_dict = {anchor[i]: i for i in range(len(anchor))}
     return [anchor_dict[int(i)] for i in x]
@@ -128,6 +149,12 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return mll, model
+
+
+def new_EI_local_search(AF, x, anchors):
+    features = new_featurize(x.unsqueeze(0), anchors).unsqueeze(0).detach()
+    for feature in features:
+        break
 
 
 def EI_local_search(AF, x, anchors):
@@ -223,10 +250,11 @@ def bo_loop(dim, benchmark_index, kernel_type, M=20):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_average_kernel_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_average_acquisition_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':
+    """
     parser_ = argparse.ArgumentParser(
         description='Bayesian optimization over permutations (QAP)')
     parser_.add_argument('--dim', dest='dim', type=int, default=10)
@@ -235,4 +263,13 @@ if __name__ == '__main__':
     args_ = parser_.parse_args()
     kwag_ = vars(args_)
     bo_loop(kwag_['dim'], kwag_['benchmark_index'], kwag_['kernel_type'])
+    """
+    x = torch.from_numpy(np.array([np.random.permutation(np.arange(10)) for _ in range(5)]))
+    anchors = [np.random.permutation(np.arange(10)) for _ in range(2)]
+    inputs = new_featurize(x, anchors)
+    print(inputs)
+    print(inputs.shape)
+    a = torch.ones(2,5,10)
+    for i in a:
+        print(i.shape)
 

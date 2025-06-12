@@ -85,16 +85,24 @@ def featurize(x, anchors):
     assert len(x.shape) == 2, "Only featurize 2 dimension permutation vector"
     features = []
     x_copy = deepcopy(x)
-    for arr in x_copy:
-        feature = []
-        for anchor in anchors:
-            arr_anchor = anchor_mapping(arr, anchor)
-            feature.append(merge_sort(arr_anchor))
-        features.append(feature)
-    features = np.array(features)
-    features = np.mean(features, axis=1)
-    normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
-    return torch.tensor(features/normalizer)
+
+    if anchors is not None:
+        for arr in x_copy:
+            feature = []
+            for anchor in anchors:
+                arr_anchor = anchor_mapping(arr, anchor)
+                feature.append(merge_sort(arr_anchor))
+            features.append(feature)
+        features = np.array(features)
+        features = np.mean(features, axis=1)
+        normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
+        return torch.tensor(features/normalizer)
+    else:
+        for arr in x_copy:
+            feature = merge_sort(arr)
+            features.append(feature)
+        normalizer = np.sqrt(x.size(1) * (x.size(1) - 1) / 2)
+        return torch.tensor(features / normalizer)
 
 
 def anchor_mapping(x, anchor):
@@ -159,7 +167,7 @@ def EI_local_search(AF, x, anchors):
     return torch.from_numpy(best_point), best_val
 
 
-def bo_loop(dim, benchmark_index, kernel_type, M=20):
+def bo_loop(dim, benchmark_index, kernel_type, early_stop=50):
     n_init = 20
     n_evals = 200
     for nruns in range(20):
@@ -171,11 +179,14 @@ def bo_loop(dim, benchmark_index, kernel_type, M=20):
         for i in range(n_init):
             outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
         train_y = -1*torch.tensor(outputs)
-        anchors = [np.random.permutation(np.arange(dim)) for _ in range(M)]  # Random anchor initialization
 
-        for num_iters in range(n_init, n_evals):
+        n = train_x.shape[-1]
+        standard_perm = np.arange(n)
+        anchor_set = np.stack([np.roll(standard_perm, shift=i) for i in range(n)])
 
-            inputs = featurize(train_x, anchors)
+        for num_iters in range(n_init, early_stop):
+
+            inputs = featurize(train_x, anchor_set)
             if kernel_type == 'merge':
                 covar_module = MergeKernel()
             train_y = (train_y - torch.mean(train_y))/(torch.std(train_y))
@@ -187,9 +198,9 @@ def bo_loop(dim, benchmark_index, kernel_type, M=20):
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
-            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchors)
+            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor_set)
             for _ in range(10):
-                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchors)
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor_set)
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val
@@ -208,6 +219,48 @@ def bo_loop(dim, benchmark_index, kernel_type, M=20):
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
             torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_average_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+
+        for num_iters in range(early_stop, n_evals):
+
+            anchor_set = None
+            inputs = featurize(train_x, anchor_set)
+            if kernel_type == 'merge':
+                covar_module = MergeKernel()
+            train_y = (train_y - torch.mean(train_y)) / (torch.std(train_y))
+            mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
+            model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001)
+            mll_bt.model.likelihood.noise_covar.raw_noise.requires_grad = False
+            fit_gpytorch_model(mll_bt)
+            # print(train_y.dtype)
+            print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
+            EI = ExpectedImprovement(model_bt, best_f=train_y.max().item())
+            # Multiple random restarts
+            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))),
+                                                 anchor_set)
+            for _ in range(10):
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))),
+                                                     anchor_set)
+                if new_val > ls_val:
+                    best_point = new_point
+                    ls_val = new_val
+            print(f"Best Local search value: {ls_val}")
+            if not torch.all(best_point.unsqueeze(0) == train_x, axis=1).any():
+                best_next_input = best_point.unsqueeze(0)
+            else:
+                print(f"Generating randomly !!!!!!!!!!!")
+                best_next_input = torch.from_numpy(np.random.permutation(np.arange(dim))).unsqueeze(0)
+            # print(best_next_input)
+            next_val = evaluate_tsp(best_next_input, benchmark_index, dim)
+            train_x = torch.cat([train_x, best_next_input])
+            outputs.append(next_val)
+            train_y = -1 * torch.tensor(outputs)
+            # train_y = torch.cat([train_y, torch.tensor([next_val])])
+            print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
+            print(f"Best value found till now: {np.min(outputs)}")
+            torch.save({'inputs_selected': train_x, 'outputs': outputs, 'train_y': train_y},
+                       'tsp_botorch_' + kernel_type + '_EI_dim_' + str(dim) + 'benchmark_index_average_hybrid_' + str(
+                           benchmark_index) + '_nrun_' + str(nruns) + '.pkl')
+
 
 
 if __name__ == '__main__':
