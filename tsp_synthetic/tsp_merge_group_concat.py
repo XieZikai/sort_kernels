@@ -15,6 +15,10 @@ from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
 from copy import deepcopy
 
+"""
+该方法把所有anchor set进行右乘，然后concat为一个最终feature，再通过random embedding进行降维。
+"""
+
 
 class MergeKernel(Kernel):
     has_lengthscale = True
@@ -83,33 +87,14 @@ def featurize(x, anchors):
         for anchor in anchors:
             arr_anchor = anchor_mapping(arr, anchor)
             feature.append(merge_sort(arr_anchor))
+        feature = np.array(feature).reshape(-1)
         features.append(feature)
     features = np.array(features)
-    # features = np.mean(features, axis=1)
     feature_length = features.shape[-1]
-    features = features.reshape(-1, feature_length)
-    normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
-    return torch.tensor(features/normalizer)
-
-
-def new_featurize(x, anchors):
-    """
-    Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
-    """
-    assert len(x.shape) == 2, "Only featurize 2 dimension permutation vector"
-    features = []
-    x_copy = deepcopy(x)
-    for anchor in anchors:
-        feature = []
-        for arr in x_copy:
-            arr_anchor = anchor_mapping(arr, anchor)
-            feature.append(merge_sort(arr_anchor))
-        features.append(feature)
-    features = np.array(features)
     # features = np.mean(features, axis=1)
     # feature_length = features.shape[-1]
     # features = features.reshape(-1, feature_length)
-    normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
+    normalizer = np.sqrt(feature_length)
     return torch.tensor(features/normalizer)
 
 
@@ -151,50 +136,10 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
     return mll, model
 
 
-def new_EI_local_search(AF, x, anchors):
-    features = new_featurize(x.unsqueeze(0), anchors).unsqueeze(0).detach()
-    n_dim = features.shape[-1]
-
-    best_val = []
+def EI_local_search(AF, x, anchor_set):
+    feature = featurize(x.unsqueeze(0), anchor_set).unsqueeze(0).detach()
+    best_val = AF(feature)
     best_point = x.numpy()
-    for feature in features:
-        best_val.append(AF(feature).detach().numpy())
-    best_val = np.mean(best_val)
-
-    for num_steps in range(100):
-        all_vals = []
-        all_points = []
-        for i in range(len(best_point)):
-            for j in range(i + 1, len(best_point)):
-                x_new = best_point.copy()
-                x_new[i], x_new[j] = x_new[j], x_new[i]
-                features_new = new_featurize(torch.from_numpy(x_new).unsqueeze(0), anchors).reshape(-1, 1, n_dim)
-                val = []
-                for feature in features_new:
-                    val.append(AF(feature).detach())
-                val = np.mean(val)
-                all_vals.append(val)
-                all_points.append(x_new)
-        idx = np.argmax(all_vals)
-        if all_vals[idx] > best_val:
-            best_point = all_points[idx]
-            best_val = all_vals[idx]
-        else:
-            break
-    print(f"best AF value : {best_val.item()} at best_point = {best_point}")
-    return torch.from_numpy(best_point), best_val
-
-
-def EI_local_search(AF, x, anchors):
-    feature = featurize(x.unsqueeze(0), anchors).unsqueeze(0).detach()
-    n_dim = feature.shape[-1]
-    feature = feature.reshape(-1, 1, n_dim)
-    best_val = []
-    for i in range(feature.shape[0]):
-        best_val.append(AF(feature[i]).detach().numpy())
-    best_val = np.mean(best_val)
-    best_point = x.numpy()
-
     for num_steps in range(100):
         # print(f"best AF value : {best_val} at best_point = {best_point}")
         all_vals = []
@@ -203,16 +148,8 @@ def EI_local_search(AF, x, anchors):
             for j in range(i+1, len(best_point)):
                 x_new = best_point.copy()
                 x_new[i], x_new[j] = x_new[j], x_new[i]
-
-                val = []
-                feature_new = featurize(torch.from_numpy(x_new).unsqueeze(0), anchors).reshape(-1, 1, n_dim)
-                for k in range(feature_new.shape[0]):
-                    val.append(AF(feature[k]).detach().numpy())
-                val = np.mean(val)
-
-                all_vals.append(val)
+                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0), anchor_set).unsqueeze(1)).detach())
                 all_points.append(x_new)
-
         idx = np.argmax(all_vals)
         if all_vals[idx] > best_val:
             best_point = all_points[idx]
@@ -223,33 +160,30 @@ def EI_local_search(AF, x, anchors):
     return torch.from_numpy(best_point), best_val
 
 
-def bo_loop(dim, benchmark_index, kernel_type, M=20):
+def bo_loop(dim, benchmark_index, kernel_type):
     n_init = 20
     n_evals = 200
     for nruns in range(20):
         torch.manual_seed(nruns)
         np.random.seed(nruns)
-
-        anchors = [np.random.permutation(np.arange(dim)) for _ in range(M)]  # Random anchor initialization
-
         print(f'Input dimension {dim}')
         train_x = torch.from_numpy(np.array([np.random.permutation(np.arange(dim)) for _ in range(n_init)]))
         outputs = []
-
         for i in range(n_init):
             outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
-
         train_y = -1*torch.tensor(outputs)
 
         for num_iters in range(n_init, n_evals):
+            # anchor = np.random.permutation(np.arange(dim))  # random anchor for each iteration
 
-            inputs = featurize(train_x, anchors)
+            n = train_x.shape[-1]
+            standard_perm = np.arange(n)
+            anchor_set = np.stack([np.roll(standard_perm, shift=i) for i in range(n)])
+
+            inputs = featurize(train_x, anchor_set)
             if kernel_type == 'merge':
                 covar_module = MergeKernel()
-
             train_y = (train_y - torch.mean(train_y))/(torch.std(train_y))
-            train_y = train_y.repeat_interleave(M)
-
             mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
             model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001)
             mll_bt.model.likelihood.noise_covar.raw_noise.requires_grad = False
@@ -258,9 +192,9 @@ def bo_loop(dim, benchmark_index, kernel_type, M=20):
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
-            best_point, ls_val = new_EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchors)
+            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor_set)
             for _ in range(10):
-                new_point, new_val = new_EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchors)
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor_set)
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val
@@ -278,11 +212,10 @@ def bo_loop(dim, benchmark_index, kernel_type, M=20):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_average_acquisition_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_concat_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':
-    """
     parser_ = argparse.ArgumentParser(
         description='Bayesian optimization over permutations (QAP)')
     parser_.add_argument('--dim', dest='dim', type=int, default=10)
@@ -291,13 +224,4 @@ if __name__ == '__main__':
     args_ = parser_.parse_args()
     kwag_ = vars(args_)
     bo_loop(kwag_['dim'], kwag_['benchmark_index'], kwag_['kernel_type'])
-    """
-    x = torch.from_numpy(np.array([np.random.permutation(np.arange(10)) for _ in range(5)]))
-    anchors = [np.random.permutation(np.arange(10)) for _ in range(2)]
-    inputs = new_featurize(x, anchors)
-    print(inputs)
-    print(inputs.shape)
-    a = torch.ones(2,5,10)
-    for i in a:
-        print(i.shape)
 
