@@ -174,7 +174,6 @@ def bo_loop(dim, benchmark_index, kernel_type):
         train_y = -1*torch.tensor(outputs)
 
         for num_iters in range(n_init, n_evals):
-            # anchor = np.random.permutation(np.arange(dim))  # random anchor for each iteration
 
             n = train_x.shape[-1]
             standard_perm = np.arange(n)
