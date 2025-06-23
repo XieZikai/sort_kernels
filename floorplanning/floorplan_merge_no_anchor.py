@@ -17,7 +17,7 @@ from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
 
 
-class MallowsKernel(Kernel):
+class MergeKernel(Kernel):
     has_lengthscale = True
     def forward(self, X, X2, **params):
         if len(X.shape) > 2:
@@ -72,7 +72,7 @@ def merge_sort(arr):
         return feature[:-1]
 
 
-def featurize(x, anchor):
+def featurize(x):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
@@ -80,16 +80,9 @@ def featurize(x, anchor):
     feature = []
     x_copy = deepcopy(x)
     for arr in x_copy:
-        arr_anchor = anchor_mapping(arr, anchor)
-        feature.append(merge_sort(arr_anchor))
+        feature.append(merge_sort(arr))
     normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
     return torch.tensor(feature/normalizer)
-
-
-def anchor_mapping(x, anchor):
-    anchor_dict = {anchor[i]: i for i in range(len(anchor))}
-    # return [anchor_dict[int(i)] for i in x]
-    return x
 
 
 def evaluate_floorplan(x, dim):
@@ -160,8 +153,8 @@ def bo_loop(kernel_type):
         train_y = -1*torch.tensor(outputs)
         for num_iters in range(n_init, n_evals):
             inputs = featurize(train_x)
-            if kernel_type == 'mallows':
-                covar_module = MallowsKernel()
+            if kernel_type == 'merge':
+                covar_module = MergeKernel()
             train_y = (train_y - torch.mean(train_y))/(torch.std(train_y)).float()
             mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
             model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001).float()
@@ -192,14 +185,21 @@ def bo_loop(kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'floorplan_botorch_'+kernel_type+'_EI_30_nrun_'+str(nruns)+'.pkl')
+
+            file_name = 'floorplan_botorch_'+kernel_type+'_EI_30'
+            if not os.path.exists('./results/'):
+                os.makedirs('./results/')
+            if not os.path.exists(os.path.join('./results/', file_name)):
+                os.makedirs(os.path.join('./results/', file_name))
+            torch.save({'inputs_selected': train_x, 'outputs': outputs, 'train_y': train_y},
+                       os.path.join('./results/', file_name) + '_nrun_' + str(nruns) + '.pkl')
 
 
 if __name__ == '__main__':
     parser_ = argparse.ArgumentParser(
         description='Bayesian optimization over permutations (QAP)')
     # parser_.add_argument('--benchmark_index', dest='benchmark_index', type=int, default=3)
-    parser_.add_argument('--kernel_type', dest='kernel_type', type=str, default='mallows')
+    parser_.add_argument('--kernel_type', dest='kernel_type', type=str, default='merge')
     args_ = parser_.parse_args()
     kwag_ = vars(args_)
     bo_loop(kwag_['kernel_type'])
