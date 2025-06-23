@@ -15,6 +15,10 @@ from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
 from copy import deepcopy
 
+"""
+该方法把所有anchor set进行右乘，然后concat为一个最终feature，使用random embedding进行降维。
+"""
+
 
 class MergeKernel(Kernel):
     has_lengthscale = True
@@ -71,24 +75,35 @@ def merge_sort(arr):
         return feature[:-1]
 
 
-def featurize(x, anchor):
+def featurize(x, anchors, embedding_matrix=None):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
     assert len(x.shape) == 2, "Only featurize 2 dimension permutation vector"
-    feature = []
+    features = []
     x_copy = deepcopy(x)
     for arr in x_copy:
-        arr_anchor = anchor_mapping(arr, anchor)
-        feature.append(merge_sort(arr_anchor))
-    normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
-    return torch.tensor(feature/normalizer)
+        feature = []
+        for anchor in anchors:
+            arr_anchor = anchor_mapping(arr, anchor)
+            feature.append(merge_sort(arr_anchor))
+        feature = np.array(feature).reshape(-1)
+        features.append(feature)
+    features = np.array(features)
+    feature_length = features.shape[-1]
+    # features = np.mean(features, axis=1)
+    # feature_length = features.shape[-1]
+    # features = features.reshape(-1, feature_length)
+    normalizer = np.sqrt(feature_length)
+    features = features / normalizer
+    if embedding_matrix is not None:
+        features = np.matmul(features, embedding_matrix)
+    return torch.tensor(features/normalizer)
 
 
 def anchor_mapping(x, anchor):
     anchor_dict = {anchor[i]: i for i in range(len(anchor))}
-    # return [anchor_dict[int(i)] for i in x]
-    return x
+    return [anchor_dict[int(i)] for i in x]
 
 
 def evaluate_tsp(x, benchmark_index, dim):
@@ -124,8 +139,8 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
     return mll, model
 
 
-def EI_local_search(AF, x, anchor):
-    feature = featurize(x.unsqueeze(0), anchor).unsqueeze(0).detach()
+def EI_local_search(AF, x, anchor_set, embedding_matrix=None):
+    feature = featurize(x.unsqueeze(0), anchor_set, embedding_matrix=embedding_matrix).unsqueeze(0).detach()
     best_val = AF(feature)
     best_point = x.numpy()
     for num_steps in range(100):
@@ -136,7 +151,7 @@ def EI_local_search(AF, x, anchor):
             for j in range(i+1, len(best_point)):
                 x_new = best_point.copy()
                 x_new[i], x_new[j] = x_new[j], x_new[i]
-                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0), anchor).unsqueeze(1)).detach())
+                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0), anchor_set, embedding_matrix=embedding_matrix).unsqueeze(1)).detach())
                 all_points.append(x_new)
         idx = np.argmax(all_vals)
         if all_vals[idx] > best_val:
@@ -148,21 +163,31 @@ def EI_local_search(AF, x, anchor):
     return torch.from_numpy(best_point), best_val
 
 
-def bo_loop(dim, benchmark_index, kernel_type):
+def bo_loop(dim, benchmark_index, kernel_type, embedding_dim=20):
     n_init = 20
     n_evals = 200
     for nruns in range(20):
         torch.manual_seed(nruns)
         np.random.seed(nruns)
+
         print(f'Input dimension {dim}')
         train_x = torch.from_numpy(np.array([np.random.permutation(np.arange(dim)) for _ in range(n_init)]))
         outputs = []
         for i in range(n_init):
             outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
         train_y = -1*torch.tensor(outputs)
+
+        n = train_x.shape[-1]
+        standard_perm = np.arange(n)
+        anchor_set = np.stack([np.roll(standard_perm, shift=i) for i in range(n)])
+
+        temp = featurize(train_x, anchor_set)
+        embedding_input_dim = temp.shape[-1]
+        embedding_matrix = np.random.rand(embedding_input_dim, embedding_dim)
+
         for num_iters in range(n_init, n_evals):
-            anchor = np.random.permutation(np.arange(dim))  # Random anchor initialization
-            inputs = featurize(train_x, anchor)
+
+            inputs = featurize(train_x, anchor_set, embedding_matrix=embedding_matrix)
             if kernel_type == 'merge':
                 covar_module = MergeKernel()
             train_y = (train_y - torch.mean(train_y))/(torch.std(train_y))
@@ -174,9 +199,9 @@ def bo_loop(dim, benchmark_index, kernel_type):
             print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
-            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
+            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor_set, embedding_matrix=embedding_matrix)
             for _ in range(10):
-                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor_set, embedding_matrix=embedding_matrix)
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val
@@ -194,15 +219,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-
-            file_name = 'tsp_botorch_' + kernel_type + '_EI_dim_' + str(
-                dim) + 'benchmark_index_no_anchor_' + str(benchmark_index)
-            if not os.path.exists('./results/'):
-                os.makedirs('./results/')
-            if not os.path.exists(os.path.join('./results/', file_name)):
-                os.makedirs(os.path.join('./results/', file_name))
-            torch.save({'inputs_selected': train_x, 'outputs': outputs, 'train_y': train_y},
-                       os.path.join('./results/', file_name) + '_nrun_' + str(nruns) + '.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_concat_random_embedding_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':

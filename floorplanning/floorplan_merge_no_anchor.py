@@ -5,22 +5,19 @@ import matplotlib.pyplot as plt
 import scipy.io
 import os, subprocess
 import argparse
+from copy import deepcopy
 
 import botorch
-from botorch.fit import fit_gpytorch_model
-from botorch.models import SingleTaskGP
+from botorch import fit_gpytorch_model
+from botorch.models import FixedNoiseGP, SingleTaskGP
+from botorch.optim import module_to_array
 from botorch.acquisition import ExpectedImprovement
 from gpytorch.constraints import Interval, Positive
 from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
-from copy import deepcopy
-
-"""
-该方法把所有anchor set进行右乘，然后concat为一个最终feature，使用random embedding进行降维。
-"""
 
 
-class MergeKernel(Kernel):
+class MallowsKernel(Kernel):
     has_lengthscale = True
     def forward(self, X, X2, **params):
         if len(X.shape) > 2:
@@ -75,55 +72,40 @@ def merge_sort(arr):
         return feature[:-1]
 
 
-def featurize(x, anchors, embedding_matrix=None):
+def featurize(x, anchor):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
     assert len(x.shape) == 2, "Only featurize 2 dimension permutation vector"
-    features = []
+    feature = []
     x_copy = deepcopy(x)
     for arr in x_copy:
-        feature = []
-        for anchor in anchors:
-            arr_anchor = anchor_mapping(arr, anchor)
-            feature.append(merge_sort(arr_anchor))
-        feature = np.array(feature).reshape(-1)
-        features.append(feature)
-    features = np.array(features)
-    feature_length = features.shape[-1]
-    # features = np.mean(features, axis=1)
-    # feature_length = features.shape[-1]
-    # features = features.reshape(-1, feature_length)
-    normalizer = np.sqrt(feature_length)
-    features = features / normalizer
-    if embedding_matrix is not None:
-        features = np.matmul(features, embedding_matrix)
-    return torch.tensor(features/normalizer)
+        arr_anchor = anchor_mapping(arr, anchor)
+        feature.append(merge_sort(arr_anchor))
+    normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
+    return torch.tensor(feature/normalizer)
 
 
 def anchor_mapping(x, anchor):
     anchor_dict = {anchor[i]: i for i in range(len(anchor))}
-    return [anchor_dict[int(i)] for i in x]
+    # return [anchor_dict[int(i)] for i in x]
+    return x
 
 
-def evaluate_tsp(x, benchmark_index, dim):
+def evaluate_floorplan(x, dim):
     if x.dim() == 2:
         x = x.squeeze(0)
-    x = x.numpy()
-    A = np.asarray(scipy.io.loadmat('pcb_dim_'+str(dim) + '_'+str(benchmark_index+1)+'.mat')['A'])
-    B = np.asarray(scipy.io.loadmat('pcb_dim_'+str(dim) + '_'+str(benchmark_index+1)+'.mat')['B'])
-    E = np.eye(dim)
-
-    permutation = np.array([np.arange(dim), x])
-
-    P = np.zeros([dim, dim]) #initialize the permutation matrix
-
-    for i in range(0,dim):
-        P[:, i] = E[:, permutation[1][i]]
-
-    result = (np.trace(P.dot(B).dot(P.T).dot(A.T)))
-    print(f"Objective value: {result/10000}")
-    return result/10000
+    # print(f"x {x}")
+    with open("permutation.txt", "w") as f:
+        for i in range(len(x)):
+            print(x[i].item(), end=',', file=f)
+    FNULL = open(os.devnull, 'w')
+    subprocess.call(['./floorplan_simulation', 'b1_floorplan.blk'], stdout=FNULL, stderr=subprocess.STDOUT)
+    with open("output_floorplan.txt", "r") as f:
+        fl = f.readlines()
+    output = float(fl[0])
+    print(f"result: {output}")
+    return output
 
 
 def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
@@ -139,9 +121,8 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
     return mll, model
 
 
-def EI_local_search(AF, x, anchor_set, , embedding_matrix=None):
-    feature = featurize(x.unsqueeze(0), anchor_set, embedding_matrix=embedding_matrix).unsqueeze(0).detach()
-    best_val = AF(feature)
+def EI_local_search(AF, x):
+    best_val = AF(featurize(x.unsqueeze(0)).unsqueeze(1).detach())
     best_point = x.numpy()
     for num_steps in range(100):
         # print(f"best AF value : {best_val} at best_point = {best_point}")
@@ -151,7 +132,7 @@ def EI_local_search(AF, x, anchor_set, , embedding_matrix=None):
             for j in range(i+1, len(best_point)):
                 x_new = best_point.copy()
                 x_new[i], x_new[j] = x_new[j], x_new[i]
-                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0), anchor_set, embedding_matrix=embedding_matrix).unsqueeze(1)).detach())
+                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0)).unsqueeze(1)).detach())
                 all_points.append(x_new)
         idx = np.argmax(all_vals)
         if all_vals[idx] > best_val:
@@ -163,45 +144,36 @@ def EI_local_search(AF, x, anchor_set, , embedding_matrix=None):
     return torch.from_numpy(best_point), best_val
 
 
-def bo_loop(dim, benchmark_index, kernel_type, embedding_dim=20):
+def bo_loop(kernel_type):
     n_init = 20
     n_evals = 200
     for nruns in range(20):
         torch.manual_seed(nruns)
         np.random.seed(nruns)
-
+        dim = 30 # np.asarray(scipy.io.loadmat('../COMBO/qap_test/QAP_LIB_A'+str(benchmark_index+1)+'.mat')['A']).shape[0]
         print(f'Input dimension {dim}')
         train_x = torch.from_numpy(np.array([np.random.permutation(np.arange(dim)) for _ in range(n_init)]))
         outputs = []
         for i in range(n_init):
-            outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
+            outputs.append(evaluate_floorplan(train_x[i], dim))
+            # outputs.append(evaluate_qap(train_x[i], benchmark_index, dim))
         train_y = -1*torch.tensor(outputs)
-
-        n = train_x.shape[-1]
-        standard_perm = np.arange(n)
-        anchor_set = np.stack([np.roll(standard_perm, shift=i) for i in range(n)])
-
-        temp = featurize(train_x, anchor_set)
-        embedding_input_dim = temp.shape[-1]
-        embedding_matrix = np.random.rand(embedding_input_dim, embedding_dim)
-
         for num_iters in range(n_init, n_evals):
-
-            inputs = featurize(train_x, anchor_set, embedding_matrix=embedding_matrix)
-            if kernel_type == 'merge':
-                covar_module = MergeKernel()
-            train_y = (train_y - torch.mean(train_y))/(torch.std(train_y))
+            inputs = featurize(train_x)
+            if kernel_type == 'mallows':
+                covar_module = MallowsKernel()
+            train_y = (train_y - torch.mean(train_y))/(torch.std(train_y)).float()
             mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
-            model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001)
+            model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001).float()
             mll_bt.model.likelihood.noise_covar.raw_noise.requires_grad = False
             fit_gpytorch_model(mll_bt)
             # print(train_y.dtype)
-            print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
+            print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y.float())}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
-            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor_set)
+            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))
             for _ in range(10):
-                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor_set)
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val
@@ -212,23 +184,23 @@ def bo_loop(dim, benchmark_index, kernel_type, embedding_dim=20):
                 print(f"Generating randomly !!!!!!!!!!!")
                 best_next_input = torch.from_numpy(np.random.permutation(np.arange(dim))).unsqueeze(0)
             # print(best_next_input)
-            next_val = evaluate_tsp(best_next_input, benchmark_index, dim)
+            next_val = evaluate_floorplan(best_next_input, dim)
+            # next_val = evaluate_qap(best_next_input, benchmark_index, dim)
             train_x = torch.cat([train_x, best_next_input])
             outputs.append(next_val)
             train_y = -1*torch.tensor(outputs)
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_group_concat_random_embedding_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'floorplan_botorch_'+kernel_type+'_EI_30_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':
     parser_ = argparse.ArgumentParser(
         description='Bayesian optimization over permutations (QAP)')
-    parser_.add_argument('--dim', dest='dim', type=int, default=10)
-    parser_.add_argument('--benchmark_index', dest='benchmark_index', type=int, default=0)
-    parser_.add_argument('--kernel_type', dest='kernel_type', type=str, default='merge')
+    # parser_.add_argument('--benchmark_index', dest='benchmark_index', type=int, default=3)
+    parser_.add_argument('--kernel_type', dest='kernel_type', type=str, default='mallows')
     args_ = parser_.parse_args()
     kwag_ = vars(args_)
-    bo_loop(kwag_['dim'], kwag_['benchmark_index'], kwag_['kernel_type'])
+    bo_loop(kwag_['kernel_type'])
 

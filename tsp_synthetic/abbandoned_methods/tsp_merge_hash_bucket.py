@@ -71,7 +71,32 @@ def merge_sort(arr):
         return feature[:-1]
 
 
-def featurize(x, anchor):
+def merge_hash_features(merge_feature, k):
+    """
+    统计长度为k的窗口在 merge sort 特征中的哈希桶频次（共2^k个桶）
+
+    参数:
+        merge_feature (List[int]): 由 -1 和 1 组成的 merge sort 比较序列
+        k (int): 滑动窗口的长度
+
+    返回:
+        hash_vector (torch.Tensor): 长度为 2^k 的哈希桶频次向量
+    """
+    num_buckets = 2 ** k
+    hash_vector = [0] * num_buckets
+
+    for i in range(len(merge_feature) - k + 1):
+        window = merge_feature[i:i + k]
+        # 将 -1 映射为 0，1 映射为 1
+        bit_string = [(1 if x > 0 else 0) for x in window]
+        # 二进制转十进制索引
+        idx = int("".join(map(str, bit_string)), 2)
+        hash_vector[idx] += 1
+
+    return hash_vector
+
+
+def featurize(x, anchor, k=3):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
@@ -80,8 +105,10 @@ def featurize(x, anchor):
     x_copy = deepcopy(x)
     for arr in x_copy:
         arr_anchor = anchor_mapping(arr, anchor)
-        feature.append(merge_sort(arr_anchor))
-    normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2)
+        merge_sort_result = merge_sort(arr_anchor)
+        merge_hash_result = merge_hash_features(merge_sort_result, k)
+        feature.append(merge_hash_result)
+    normalizer = np.sqrt(len(feature[0]))
     return torch.tensor(feature/normalizer)
 
 
@@ -194,15 +221,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             # train_y = torch.cat([train_y, torch.tensor([next_val])])
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
-
-            file_name = 'tsp_botorch_' + kernel_type + '_EI_dim_' + str(
-                dim) + 'benchmark_index_no_anchor_' + str(benchmark_index)
-            if not os.path.exists('./results/'):
-                os.makedirs('./results/')
-            if not os.path.exists(os.path.join('./results/', file_name)):
-                os.makedirs(os.path.join('./results/', file_name))
-            torch.save({'inputs_selected': train_x, 'outputs': outputs, 'train_y': train_y},
-                       os.path.join('./results/', file_name) + '_nrun_' + str(nruns) + '.pkl')
+            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_hash_bucket_'+str(benchmark_index)+'_nrun_'+str(nruns)+'.pkl')
 
 
 if __name__ == '__main__':
