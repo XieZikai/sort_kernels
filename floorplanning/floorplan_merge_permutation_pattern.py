@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import scipy.io
 import os, subprocess
 import argparse
+from copy import deepcopy
 
 import botorch
 from botorch import fit_gpytorch_model
@@ -14,9 +15,43 @@ from botorch.acquisition import ExpectedImprovement
 from gpytorch.constraints import Interval, Positive
 from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
+from itertools import permutations
 
 
-class MallowsKernel(Kernel):
+def get_relative_order(window):
+    order = sorted(range(len(window)), key=lambda i: window[i])
+    relative = [0] * len(window)
+    for rank, idx in enumerate(order):
+        relative[idx] = rank
+    return tuple(relative)
+
+
+def pattern_count_feature_circular(perm, k):
+    """
+    计算循环滑动窗口的排序模式计数。
+
+    参数：
+      - perm: 输入置换（长度为 n 的 list 或 np.array）
+      - k: 滑动窗口长度
+
+    返回：
+      - 长度为 k! 的 numpy 向量，统计每种模式出现的次数
+    """
+    n = len(perm)
+    patterns = list(permutations(range(k)))
+    pattern_to_index = {p: i for i, p in enumerate(patterns)}
+    counts = np.zeros(len(patterns), dtype=int)
+
+    for i in range(n):
+        window = [perm[(i + j) % n] for j in range(k)]  # 循环索引
+        pat = get_relative_order(window)
+        idx = pattern_to_index[pat]
+        counts[idx] += 1
+
+    return list(counts)
+
+
+class MergeKernel(Kernel):
     has_lengthscale = True
     def forward(self, X, X2, **params):
         if len(X.shape) > 2:
@@ -26,16 +61,64 @@ class MallowsKernel(Kernel):
         return torch.exp(-self.lengthscale * kernel_mat)
 
 
-def featurize(x):
-    featurized_x = []
-    for nums in range(x.size(0)):
-        vec = []
-        for i in range(x.size(1)):
-            for j in range(i+1, x.size(1)):
-                vec.append(1 if x[nums][i] > x[nums][j] else -1)
-        featurized_x.append(vec)
-    normalizer = np.sqrt(x.size(1)*(x.size(1) - 1)/2) 
-    return torch.tensor(featurized_x/normalizer).float()
+def merge_sort(arr):
+    # print(f'Handling array: {arr}')
+    if len(arr) == 1:
+        return []
+    if len(arr) > 1:
+        mid = len(arr) // 2
+        left_half = deepcopy(arr[:mid])
+        right_half = deepcopy(arr[mid:])
+
+        left_feature = merge_sort(left_half)
+        right_feature = merge_sort(right_half)
+
+        # print(f'L & R: {left_feature}, {right_feature}')
+        feature = [] + left_feature + right_feature
+
+        i = j = k = 0
+
+        # Merge the two halves into the original list
+        while i < len(left_half) and j < len(right_half):
+            if left_half[i] < right_half[j]:
+                arr[k] = left_half[i]
+                i += 1
+                feature.append(-1)
+            else:
+                arr[k] = right_half[j]
+                j += 1
+                feature.append(1)
+            k += 1
+
+        while i < len(left_half):
+            arr[k] = left_half[i]
+            i += 1
+            k += 1
+            feature.append(1)
+
+        while j < len(right_half):
+            arr[k] = right_half[j]
+            j += 1
+            k += 1
+            feature.append(-1)
+
+        # print('Return: ', feature)
+        return feature[:-1]
+
+
+def featurize(x, k=4):
+    """
+    Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
+    """
+    assert len(x.shape) == 2, "Only featurize 2 dimension permutation vector"
+    feature = []
+    x_copy = deepcopy(x)
+    for arr in x_copy:
+        pattern = pattern_count_feature_circular(arr, k)
+        feature.append(pattern)
+    normalizer = np.sqrt(len(feature[0]))
+    return torch.tensor(feature/normalizer)
+
 
 
 def evaluate_floorplan(x, dim):
@@ -98,7 +181,7 @@ def bo_loop(kernel_type):
         np.random.seed(nruns)
         dim = 30 # np.asarray(scipy.io.loadmat('../COMBO/qap_test/QAP_LIB_A'+str(benchmark_index+1)+'.mat')['A']).shape[0]
         print(f'Input dimension {dim}')
-        train_x = torch.from_numpy(np.array([np.random.permutation(np.arange(dim)) for _ in range(n_init)])) 
+        train_x = torch.from_numpy(np.array([np.random.permutation(np.arange(dim)) for _ in range(n_init)]))
         outputs = []
         for i in range(n_init):
             outputs.append(evaluate_floorplan(train_x[i], dim))
@@ -106,8 +189,8 @@ def bo_loop(kernel_type):
         train_y = -1*torch.tensor(outputs)
         for num_iters in range(n_init, n_evals):
             inputs = featurize(train_x)
-            if kernel_type == 'mallows':
-                covar_module = MallowsKernel()
+            if kernel_type == 'merge':
+                covar_module = MergeKernel()
             train_y = (train_y - torch.mean(train_y))/(torch.std(train_y)).float()
             mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
             model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001).float()
@@ -119,7 +202,7 @@ def bo_loop(kernel_type):
             # Multiple random restarts
             best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))
             for _ in range(10):
-                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim)))) 
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val
@@ -139,22 +222,20 @@ def bo_loop(kernel_type):
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
 
-            file_name = 'floorplan_botorch_' + kernel_type + '_EI_30'
-            save_dir = os.path.join('./results/', file_name)
-
+            file_name = 'floorplan_botorch_'+kernel_type+'_EI_30_k4_permutation_pattern'
             if not os.path.exists('./results/'):
                 os.makedirs('./results/')
-            if not os.path.exists(save_dir):
-                os.makedirs(save_dir)
+            if not os.path.exists(os.path.join('./results/', file_name)):
+                os.makedirs(os.path.join('./results/', file_name))
             torch.save({'inputs_selected': train_x, 'outputs': outputs, 'train_y': train_y},
-                       os.path.join(save_dir, file_name) + '_nrun_' + str(nruns) + '.pkl')
+                       os.path.join('./results/', file_name) + '_nrun_' + str(nruns) + '.pkl')
 
 
 if __name__ == '__main__':
     parser_ = argparse.ArgumentParser(
         description='Bayesian optimization over permutations (QAP)')
     # parser_.add_argument('--benchmark_index', dest='benchmark_index', type=int, default=3)
-    parser_.add_argument('--kernel_type', dest='kernel_type', type=str, default='mallows')
+    parser_.add_argument('--kernel_type', dest='kernel_type', type=str, default='merge')
     args_ = parser_.parse_args()
     kwag_ = vars(args_)
     bo_loop(kwag_['kernel_type'])
