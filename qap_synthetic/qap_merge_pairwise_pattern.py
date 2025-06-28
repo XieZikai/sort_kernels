@@ -115,8 +115,8 @@ def featurize(x, k=4):
         arr_copy = deepcopy(arr)
         merge_sort_result = merge_sort(arr)
         pairwise_feature = half_pairwise_comparison(arr_copy)
-        pattern = pattern_count_feature_circular(arr_copy, k)
-        feature.append(merge_sort_result + pairwise_feature + pattern)
+        pattern4 = pattern_count_feature_circular(arr_copy, 4)
+        feature.append(merge_sort_result + pairwise_feature + pattern4)
     normalizer = np.sqrt(len(feature[0]))
     return torch.tensor(feature/normalizer)
 
@@ -237,7 +237,7 @@ def bo_loop(benchmark_index, kernel_type):
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
 
-            file_name = 'qap_botorch_'+kernel_type+'_EI_benchmark_index_k4_pairwise_pattern_'+str(benchmark_index)
+            file_name = 'qap_botorch_'+kernel_type+'_EI_benchmark_index_k34_pairwise_pattern_'+str(benchmark_index)
             save_dir = os.path.join('./results/', file_name)
 
             if not os.path.exists('./results/'):

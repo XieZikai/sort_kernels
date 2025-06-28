@@ -50,7 +50,6 @@ def pattern_count_feature_circular(perm, k):
     return list(counts)
 
 
-
 class MergeKernel(Kernel):
     has_lengthscale = True
     def forward(self, X, X2, **params):
@@ -104,7 +103,7 @@ def merge_sort(arr):
         # print('Return: ', feature)
         return feature[:-1]
 
-def featurize(x, k=5):
+def featurize(x, k=4):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
@@ -114,8 +113,9 @@ def featurize(x, k=5):
     for arr in x_copy:
         arr_copy = deepcopy(arr)
         merge_sort_result = merge_sort(arr)
-        pattern = pattern_count_feature_circular(arr_copy, k)
-        feature.append(merge_sort_result + pattern)
+        pattern3 = pattern_count_feature_circular(arr_copy, 3)
+        pattern4 = pattern_count_feature_circular(arr_copy, 4)
+        feature.append(merge_sort_result + pattern3 + pattern4)
     normalizer = np.sqrt(len(feature[0]))
     return torch.tensor(feature/normalizer)
 
@@ -177,7 +177,7 @@ def EI_local_search(AF, x):
 def bo_loop(benchmark_index, kernel_type):
     n_init = 20
     n_evals = 200
-    for nruns in range(20):
+    for nruns in range(1):
         torch.manual_seed(nruns)
         np.random.seed(nruns)
         dim = np.asarray(scipy.io.loadmat('QAP_LIB_A'+str(benchmark_index+1)+'.mat')['A']).shape[0]
@@ -221,7 +221,7 @@ def bo_loop(benchmark_index, kernel_type):
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
 
-            file_name = 'qap_botorch_'+kernel_type+'_EI_benchmark_index_k5_with_permutation_pattern_'+str(benchmark_index)
+            file_name = 'qap_botorch_'+kernel_type+'_EI_benchmark_index_k34_with_permutation_pattern_'+str(benchmark_index)
             save_dir = os.path.join('./results/', file_name)
 
             if not os.path.exists('./results/'):

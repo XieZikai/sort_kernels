@@ -118,9 +118,8 @@ def featurize(x, anchor, k=4):
         arr_anchor = anchor_mapping(arr, anchor)
         merge_sort_result = merge_sort(arr_anchor)
         pairwise_feature = half_pairwise_comparison(arr_copy)
-        pattern3 = pattern_count_feature_circular(arr_copy, 3)
         pattern4 = pattern_count_feature_circular(arr_copy, 4)
-        feature.append(merge_sort_result + pairwise_feature + pattern3 + pattern4)
+        feature.append(merge_sort_result + pairwise_feature + pattern4 + lehmer_hist(arr_copy))
     normalizer = np.sqrt(len(feature[0]))
     return torch.tensor(feature/normalizer)
 
@@ -130,18 +129,19 @@ def anchor_mapping(x, anchor):
     # return [anchor_dict[int(i)] for i in x]
     return x
 
-
-def shift_hist(perm, max_shift=5):
-    n = len(perm)
-    shifts = np.array([perm.index(i) - i for i in range(n)])
+def shift_hist(arr, max_shift=5):
+    perm = arr.numpy()
+    n   = len(perm)
+    pos = {v: i for i, v in enumerate(perm)}          # π⁻¹
+    shifts = [pos[i] - i for i in range(n)]
     shifts = np.clip(shifts, -max_shift, max_shift)
-    hist = np.zeros(2*max_shift+1, dtype=np.float32)
-    for s in shifts:
-        hist[s + max_shift] += 1
-    return hist / n
+    hist   = np.bincount(np.array(shifts) + max_shift,
+                         minlength=2*max_shift+1)
+    return hist.tolist()
 
 
-def lehmer_hist(perm, bins=10):
+def lehmer_hist(arr, bins=10):
+    perm = arr.numpy()
     n = len(perm)
     code = []
     for i in range(n):
@@ -149,7 +149,7 @@ def lehmer_hist(perm, bins=10):
     # 分桶 [0, floor(n/bins) …]
     edges = np.linspace(0, n-1, bins+1)
     hist, _ = np.histogram(code, bins=edges)
-    return hist.astype(np.float32) / n
+    return hist.tolist()
 
 
 def half_pairwise_comparison(arr):
@@ -271,7 +271,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
 
-            file_name = 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_k34_pairwise_pattern_'+str(benchmark_index)
+            file_name = 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_lehmer_pairwise_pattern_'+str(benchmark_index)
             if not os.path.exists('./results/'):
                 os.makedirs('./results/')
             if not os.path.exists(os.path.join('./results/', file_name)):

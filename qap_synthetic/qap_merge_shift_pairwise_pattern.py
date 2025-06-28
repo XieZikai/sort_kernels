@@ -5,17 +5,16 @@ import matplotlib.pyplot as plt
 import scipy.io
 import os, subprocess
 import argparse
+from copy import deepcopy
 
 import botorch
 from botorch.fit import fit_gpytorch_model
-from botorch.models import SingleTaskGP
+from botorch.models.gp_regression import SingleTaskGP
 from botorch.acquisition import ExpectedImprovement
 from gpytorch.constraints import Interval, Positive
 from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel
-from copy import deepcopy
 from itertools import permutations
-import numpy as np
 
 
 def get_relative_order(window):
@@ -51,6 +50,7 @@ def pattern_count_feature_circular(perm, k):
     return list(counts)
 
 
+
 class MergeKernel(Kernel):
     has_lengthscale = True
     def forward(self, X, X2, **params):
@@ -59,7 +59,6 @@ class MergeKernel(Kernel):
         else:
             kernel_mat = torch.sum((X[:, None, :] - X2)**2, axis=-1)
         return torch.exp(-self.lengthscale * kernel_mat)
-
 
 def merge_sort(arr):
     # print(f'Handling array: {arr}')
@@ -105,8 +104,7 @@ def merge_sort(arr):
         # print('Return: ', feature)
         return feature[:-1]
 
-
-def featurize(x, anchor, k=4):
+def featurize(x, k=4):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
@@ -115,33 +113,27 @@ def featurize(x, anchor, k=4):
     x_copy = deepcopy(x)
     for arr in x_copy:
         arr_copy = deepcopy(arr)
-        arr_anchor = anchor_mapping(arr, anchor)
-        merge_sort_result = merge_sort(arr_anchor)
+        merge_sort_result = merge_sort(arr)
         pairwise_feature = half_pairwise_comparison(arr_copy)
-        pattern3 = pattern_count_feature_circular(arr_copy, 3)
         pattern4 = pattern_count_feature_circular(arr_copy, 4)
-        feature.append(merge_sort_result + pairwise_feature + pattern3 + pattern4)
+        feature.append(merge_sort_result + pairwise_feature + pattern4 + shift_hist(arr_copy))
     normalizer = np.sqrt(len(feature[0]))
     return torch.tensor(feature/normalizer)
 
 
-def anchor_mapping(x, anchor):
-    anchor_dict = {anchor[i]: i for i in range(len(anchor))}
-    # return [anchor_dict[int(i)] for i in x]
-    return x
-
-
-def shift_hist(perm, max_shift=5):
-    n = len(perm)
-    shifts = np.array([perm.index(i) - i for i in range(n)])
+def shift_hist(arr, max_shift=5):
+    perm = arr.numpy()
+    n   = len(perm)
+    pos = {v: i for i, v in enumerate(perm)}          # π⁻¹
+    shifts = [pos[i] - i for i in range(n)]
     shifts = np.clip(shifts, -max_shift, max_shift)
-    hist = np.zeros(2*max_shift+1, dtype=np.float32)
-    for s in shifts:
-        hist[s + max_shift] += 1
-    return hist / n
+    hist   = np.bincount(np.array(shifts) + max_shift,
+                         minlength=2*max_shift+1)
+    return hist.tolist()
 
 
-def lehmer_hist(perm, bins=10):
+def lehmer_hist(arr, bins=10):
+    perm = arr.numpy()
     n = len(perm)
     code = []
     for i in range(n):
@@ -149,7 +141,7 @@ def lehmer_hist(perm, bins=10):
     # 分桶 [0, floor(n/bins) …]
     edges = np.linspace(0, n-1, bins+1)
     hist, _ = np.histogram(code, bins=edges)
-    return hist.astype(np.float32) / n
+    return hist.tolist()
 
 
 def half_pairwise_comparison(arr):
@@ -167,24 +159,22 @@ def half_pairwise_comparison(arr):
     return feature
 
 
-def evaluate_tsp(x, benchmark_index, dim):
+def evaluate_qap(x, benchmark_index, dim):
     if x.dim() == 2:
         x = x.squeeze(0)
     x = x.numpy()
-    A = np.asarray(scipy.io.loadmat('pcb_dim_'+str(dim) + '_'+str(benchmark_index+1)+'.mat')['A'])
-    B = np.asarray(scipy.io.loadmat('pcb_dim_'+str(dim) + '_'+str(benchmark_index+1)+'.mat')['B'])
+    A = np.asarray(scipy.io.loadmat('QAP_LIB_A'+str(benchmark_index+1)+'.mat')['A'])
+    B = np.asarray(scipy.io.loadmat('QAP_LIB_'+str(benchmark_index+1)+'.mat')['B'])
     E = np.eye(dim)
-
     permutation = np.array([np.arange(dim), x])
 
     P = np.zeros([dim, dim]) #initialize the permutation matrix
 
-    for i in range(0,dim):
+    for i in range(dim):
         P[:, i] = E[:, permutation[1][i]]
-
     result = (np.trace(P.dot(B).dot(P.T).dot(A.T)))
-    print(f"Objective value: {result/10000}")
-    return result/10000
+    print(f'QAP objective value: {result}')
+    return result
 
 
 def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
@@ -200,9 +190,8 @@ def initialize_model(train_x, train_obj, covar_module=None, state_dict=None):
     return mll, model
 
 
-def EI_local_search(AF, x, anchor):
-    feature = featurize(x.unsqueeze(0), anchor).unsqueeze(0).detach()
-    best_val = AF(feature)
+def EI_local_search(AF, x):
+    best_val = AF(featurize(x.unsqueeze(0)).unsqueeze(1).detach())
     best_point = x.numpy()
     for num_steps in range(100):
         # print(f"best AF value : {best_val} at best_point = {best_point}")
@@ -212,7 +201,7 @@ def EI_local_search(AF, x, anchor):
             for j in range(i+1, len(best_point)):
                 x_new = best_point.copy()
                 x_new[i], x_new[j] = x_new[j], x_new[i]
-                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0), anchor).unsqueeze(1)).detach())
+                all_vals.append(AF(featurize(torch.from_numpy(x_new).unsqueeze(0)).unsqueeze(1)).detach())
                 all_points.append(x_new)
         idx = np.argmax(all_vals)
         if all_vals[idx] > best_val:
@@ -224,35 +213,35 @@ def EI_local_search(AF, x, anchor):
     return torch.from_numpy(best_point), best_val
 
 
-def bo_loop(dim, benchmark_index, kernel_type):
+def bo_loop(benchmark_index, kernel_type):
     n_init = 20
     n_evals = 200
     for nruns in range(20):
         torch.manual_seed(nruns)
         np.random.seed(nruns)
+        dim = np.asarray(scipy.io.loadmat('QAP_LIB_A'+str(benchmark_index+1)+'.mat')['A']).shape[0]
         print(f'Input dimension {dim}')
         train_x = torch.from_numpy(np.array([np.random.permutation(np.arange(dim)) for _ in range(n_init)]))
         outputs = []
         for i in range(n_init):
-            outputs.append(evaluate_tsp(train_x[i], benchmark_index, dim))
+            outputs.append(evaluate_qap(train_x[i], benchmark_index, dim))
         train_y = -1*torch.tensor(outputs)
         for num_iters in range(n_init, n_evals):
-            anchor = np.random.permutation(np.arange(dim))  # Random anchor initialization
-            inputs = featurize(train_x, anchor)
+            inputs = featurize(train_x)
             if kernel_type == 'merge':
                 covar_module = MergeKernel()
-            train_y = (train_y - torch.mean(train_y))/(torch.std(train_y))
+            train_y = (train_y - torch.mean(train_y))/(torch.std(train_y)).float()
             mll_bt, model_bt = initialize_model(inputs, train_y.unsqueeze(1), covar_module)
-            model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001)
+            model_bt.likelihood.noise_covar.noise = torch.tensor(0.0001).float()
             mll_bt.model.likelihood.noise_covar.raw_noise.requires_grad = False
             fit_gpytorch_model(mll_bt)
             # print(train_y.dtype)
-            print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y)}')
+            print(f'\n -- NLL: {mll_bt(model_bt(inputs), train_y.float())}')
             EI = ExpectedImprovement(model_bt, best_f = train_y.max().item())
             # Multiple random restarts
-            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
+            best_point, ls_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))
             for _ in range(10):
-                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))), anchor)
+                new_point, new_val = EI_local_search(EI, torch.from_numpy(np.random.permutation(np.arange(dim))))
                 if new_val > ls_val:
                     best_point = new_point
                     ls_val = new_val
@@ -263,7 +252,7 @@ def bo_loop(dim, benchmark_index, kernel_type):
                 print(f"Generating randomly !!!!!!!!!!!")
                 best_next_input = torch.from_numpy(np.random.permutation(np.arange(dim))).unsqueeze(0)
             # print(best_next_input)
-            next_val = evaluate_tsp(best_next_input, benchmark_index, dim)
+            next_val = evaluate_qap(best_next_input, benchmark_index, dim)
             train_x = torch.cat([train_x, best_next_input])
             outputs.append(next_val)
             train_y = -1*torch.tensor(outputs)
@@ -271,21 +260,23 @@ def bo_loop(dim, benchmark_index, kernel_type):
             print(f"\n\n Iteration {num_iters} with value: {outputs[-1]}")
             print(f"Best value found till now: {np.min(outputs)}")
 
-            file_name = 'tsp_botorch_'+kernel_type+'_EI_dim_'+str(dim)+'benchmark_index_k34_pairwise_pattern_'+str(benchmark_index)
+            file_name = 'qap_botorch_'+kernel_type+'_EI_benchmark_index_shift_pairwise_pattern_'+str(benchmark_index)
+            save_dir = os.path.join('./results/', file_name)
+
             if not os.path.exists('./results/'):
                 os.makedirs('./results/')
-            if not os.path.exists(os.path.join('./results/', file_name)):
-                os.makedirs(os.path.join('./results/', file_name))
-            torch.save({'inputs_selected':train_x, 'outputs':outputs, 'train_y':train_y}, os.path.join('./results/', file_name) +'_nrun_'+str(nruns)+'.pkl')
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            torch.save({'inputs_selected': train_x, 'outputs': outputs, 'train_y': train_y},
+                       os.path.join(save_dir, file_name) + '_nrun_' + str(nruns) + '.pkl')
 
 
 if __name__ == '__main__':
     parser_ = argparse.ArgumentParser(
         description='Bayesian optimization over permutations (QAP)')
-    parser_.add_argument('--dim', dest='dim', type=int, default=10)
-    parser_.add_argument('--benchmark_index', dest='benchmark_index', type=int, default=0)
+    parser_.add_argument('--benchmark_index', dest='benchmark_index', type=int, default=3)
     parser_.add_argument('--kernel_type', dest='kernel_type', type=str, default='merge')
     args_ = parser_.parse_args()
     kwag_ = vars(args_)
-    bo_loop(kwag_['dim'], kwag_['benchmark_index'], kwag_['kernel_type'])
+    bo_loop(kwag_['benchmark_index'], kwag_['kernel_type'])
 
