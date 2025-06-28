@@ -106,7 +106,7 @@ def merge_sort(arr):
         return feature[:-1]
 
 
-def featurize(x, anchor, k=4):
+def featurize(x, k=4):
     """
     Featurize the permutation vector into continuous space using merge kernel. Only available to permutation vector.
     """
